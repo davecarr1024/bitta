@@ -258,24 +258,23 @@ PMOS switches enable CMOS gates (no pull-up needed, complementary topology). Sta
 
 ### Components
 
-A component is a named subgraph with a defined interface.
+Components separate **definition** from **instance**. A definition is a template; an instance is a live subgraph with its own nodes.
 
 ```
-Component:
+ComponentDefinition:
   name
-  internal_nodes:    [Node]
-  internal_connections: [Connection]
-  sub_components:    [Component]   # components can contain components
-  terminals:         [Terminal]
+  terminal_names:    [str]
+  internal_topology: (nodes, connections, sub-definitions)
+
+ComponentInstance:
+  definition:        ComponentDefinition
+  internal_nodes:    [Node]            # unique per instance
+  internal_connections: [Connection]   # unique per instance
+  sub_instances:     [ComponentInstance]
+  terminals:         [Terminal]        # binds internal nodes to external nodes
 ```
 
-Components:
-- Encapsulate topology
-- Can be instantiated multiple times
-- Expose only terminals to the outside
-- Internal nodes are invisible to the parent circuit
-
-This is how complexity is managed. A D flip-flop is a component containing NAND gates. A register is a component containing D flip-flops. The simulator does not care about the hierarchy—it just sees nodes, connections, and drive intents.
+A `NAND` definition instantiated twice produces two independent subgraphs that share no nodes. This is how complexity is managed: a D flip-flop definition contains NAND gate instances; a register definition contains D flip-flop instances. The simulator does not care about the hierarchy—it just sees nodes, connections, and drive intents.
 
 #### Initial State
 
@@ -301,7 +300,7 @@ Examples:
 
 Clocks are not special. A clock is a `SquareWaveSource` attached to a node. The simulation does not know or care that it is a clock.
 
-**Important:** simulation time is not circuit time. Simulation time is an abstract counter. What matters is the *ratio* of delays: a clock period of 100 units with gate delays of 5 units is well-specified behavior.
+**Important:** simulation time is not circuit time. Simulation time is an integer tick counter. What matters is the *ratio* of delays: a clock period of 100 ticks with gate delays of 5 ticks is well-specified behavior. Integer ticks avoid floating-point comparison bugs and make event ordering unambiguous.
 
 ---
 
@@ -312,7 +311,7 @@ The event queue is the engine of the simulator.
 ```
 Event:
   id
-  time
+  time: int   # integer ticks
   action: () -> ()
 ```
 
@@ -359,39 +358,24 @@ Useful query primitives:
 
 ### Contracts
 
-A contract describes what a component should do. It is evaluated against traces after simulation.
+A contract describes what a component should do. It is evaluated against traces after simulation completes.
+
+The MVP contract system is simple: a contract is a function that takes traces and returns pass/fail with an optional message. Complexity grows from there.
 
 ```
 Contract:
   name
-  assumptions: [TraceAssertion]   # preconditions on inputs
-  guarantees:  [TraceAssertion]   # what must hold if assumptions are met
-  halt_on_violation: bool
+  check: (traces) -> Result
 ```
 
-Example—D latch:
+Example—D flip-flop:
 ```
-D latch contract:
-  assume: D is stable for setup_time before CLK falls
-  assume: D is stable for hold_time after CLK falls
-  guarantee: Q matches D within propagation_time after CLK falls
+check that Q matches D_at_last_rising_CLK_edge
 ```
 
-Contracts can be conditional: if assumptions are not met, the contract does not fire. This lets you write "this component is correct when used correctly" without requiring the simulator to enforce correct usage.
+More structured contracts (assumptions/guarantees, conditional firing, time-windowed invariants) are added as needed once the basic mechanism works. The key invariant that must hold at every stage:
 
 **Contracts never affect physics.** They observe and report. A contract violation means "the designer made an error or the parameters are wrong"—not "the simulator should intervene."
-
-#### Lemmas
-
-A lemma is a reusable trace assertion that can be composed into contracts:
-
-```
-Lemma:
-  name
-  assertion: TraceAssertion
-```
-
-Example lemmas: `setup_hold_satisfied`, `no_glitch_wider_than(N)`, `transitions_within(N_of, event)`.
 
 ---
 
@@ -431,9 +415,9 @@ These eight primitives are the complete foundation. Everything else is a compone
 
 ---
 
-## Path to CPU
+## Milestones
 
-The design is layered. Each level is fully testable before the next is built.
+The design is layered. Each level is fully testable before the next is built. Everything beyond Level 2 is future work.
 
 ```
 Level 0: Primitives
@@ -441,34 +425,31 @@ Level 0: Primitives
   Test: a single switch correctly gates a signal
 
 Level 1: Logic gates (from primitives)
-  NOT, NAND, NOR, AND, OR, XOR
+  NOT, NAND, NOR
   Test: truth tables verified via contracts
 
-Level 2: Memory elements (from gates + feedback + inertia)
-  SR latch, D latch, D flip-flop, T flip-flop
-  Test: hold behavior, setup/hold violations, metastability
+Level 2: Memory elements (from gates + feedback + inertia)  ← MVP
+  SR latch, D latch, D flip-flop
+  Test: holds state, responds to clock, respects setup/hold
 
-Level 3: Functional units (from flip-flops + combinational logic)
-  Register (N-bit), Counter, Multiplexer, Half-adder, Full-adder, Ripple-carry adder
-  Test: arithmetic correctness, timing margins
+--- everything below is future ---
 
-Level 4: CPU subsystems (from functional units)
-  ALU (add, subtract, AND, OR, compare)
-  Register file (N registers with read/write ports)
-  Program counter (register + increment)
-  Instruction decoder (combinational)
-  Control unit (state machine)
-  Test: each subsystem independently
+Level 3: Functional units
+  Register (N-bit), Multiplexer, Adder
+
+Level 4: CPU subsystems
+  ALU, Register file, Program counter, Control unit
 
 Level 5: CPU
-  Integrate subsystems
-  Define ISA (instruction set architecture)
-  Test: execute small programs, verify register state
+  Integrate subsystems, define ISA, run small programs
 ```
 
-The first milestone worth celebrating is Level 2: when a cross-coupled NAND latch holds state. That's when emergence becomes visible.
+**The MVP is a working D flip-flop.** That is the first point where:
+- feedback is real (not simulated)
+- state emerges from timing, not from special-casing
+- contracts can verify meaningful behavior (setup/hold, Q follows D)
 
-The first time the system becomes complex enough to surprise you is Level 3: a ripple-carry adder produces a glitch cascade on its carry chain before settling. Inertia and propagation delay interact in non-obvious ways. This is expected and interesting, not a bug.
+The first surprising moment is when a cross-coupled NAND latch holds state without any explicit memory mechanism. That's emergence. Everything after is complexity, not novelty.
 
 ---
 
@@ -506,19 +487,11 @@ CONFLICT nodes do not propagate to neighbors. This keeps failures local but mean
 
 1. **PMOS switches:** Start with NMOS-only (simpler) or include PMOS from the start (enables CMOS gates, no pull-ups needed)? NMOS-only is faster to implement; PMOS makes real gate topologies possible without resistors.
 
-2. **Time representation:** Integer ticks (simple, no rounding) or floating-point (more natural for delay values)? Integer ticks are strongly recommended—floating-point comparison of event times is a source of subtle bugs.
+2. **Noise injection mechanism:** Should UNRESOLVED nodes automatically receive noise after a threshold, or should noise be explicitly injected by the test bench? Automatic injection is convenient; explicit injection is more controllable and testable.
 
-3. **Noise injection mechanism:** Should UNRESOLVED nodes automatically receive noise after a threshold, or should noise be explicitly injected by the test bench? Automatic injection is convenient; explicit injection is more controllable.
+3. **Cycle detection:** Should the simulator detect zero-delay cycles at circuit build time (friendlier) or fail at runtime (simpler to implement)?
 
-4. **Contract evaluation granularity:** Are contracts evaluated once at end of simulation, or can they register time-windowed checks ("this invariant must hold from T=100 to T=200")? The latter is more powerful but harder to implement.
-
-5. **Component instantiation vs definition:** Should components be defined once and instantiated many times (like a class), or is each component a unique subgraph? Instantiation enables reuse but requires careful handling of node identity.
-
-6. **ISA definition:** When do we define the CPU's instruction set? This is not a simulator question but it shapes what Level 3 and Level 4 subsystems look like. A minimal ISA (load, store, add, branch) is enough to run small programs.
-
-7. **Cycle detection:** Should the simulator actively detect and warn about zero-delay cycles at circuit build time, or fail at runtime? Build-time detection is friendlier.
-
-8. **Maximum generation rate:** Should the simulator enforce a maximum `generation` increment rate per unit time as a runaway guard? This would catch zero-delay cycles and oscillating circuits before they run forever.
+4. **Maximum generation rate:** Should the simulator enforce a maximum `generation` increment rate per unit time as a runaway guard? This would catch oscillating circuits before they run forever, but adds complexity.
 
 ---
 
@@ -536,7 +509,7 @@ CONFLICT nodes do not propagate to neighbors. This keeps failures local but mean
 
 > A small deterministic universe where signals argue over time, and logic emerges from their interactions.
 
-The goal is a CPU built from eight primitive types, with every layer fully testable and contractually specified. The interesting moments are when emergence surprises you: a glitch cascade settling into a stable carry, a latch resolving from metastability, a clock domain crossing failing in exactly the predicted way.
+The immediate goal is a D flip-flop that holds state through timing and feedback alone, with contracts that verify its behavior. Beyond that: registers, arithmetic, and eventually a CPU—but one layer at a time, each fully verified before the next is touched.
 
 Bitta is:
 - Small enough to understand completely
