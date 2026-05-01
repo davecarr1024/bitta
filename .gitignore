@@ -1,10 +1,6 @@
-__pycache__/
-*.py[cod]
-*.pyo
-.mypy_cache/
-.pytest_cache/
-*.egg-info/
-dist/
 build/
-.venv/
-venv/
+.cache/
+compile_commands.json
+*.o
+*.a
+*.so

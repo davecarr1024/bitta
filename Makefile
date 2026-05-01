@@ -1,12 +1,17 @@
-.PHONY: test typecheck check install
+BUILD_DIR := build
 
-install:
-	pip install -e ".[dev]" -q
+.PHONY: configure build test check clean
 
-test:
-	python -m pytest; e=$$?; [ $$e -eq 0 ] || [ $$e -eq 5 ]
+configure:
+	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Debug
 
-typecheck:
-	python -m mypy bitta
+build: configure
+	cmake --build $(BUILD_DIR) -j
 
-check: typecheck test
+test: build
+	ctest --test-dir $(BUILD_DIR) --output-on-failure -j
+
+check: test
+
+clean:
+	rm -rf $(BUILD_DIR)
